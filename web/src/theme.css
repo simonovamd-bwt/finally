@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-term-bg text-term-text font-mono antialiased;
+    font-feature-settings: 'tnum' 1, 'zero' 1; /* tabular + slashed zero for numerics */
+  }
+}
+
+@layer components {
+  .panel {
+    @apply bg-term-panel border border-term-border rounded-sm;
+  }
+
+  .panel-header {
+    @apply px-3 py-1.5 text-[11px] uppercase tracking-wider text-term-muted border-b border-term-border;
+  }
+}

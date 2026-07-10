@@ -129,7 +129,8 @@ compiles `web` into static assets that `server` serves.
 
 ```
 finally/
-├── plan.md                      # this document
+├── planning/
+│   └── plan.md                  # this document
 ├── README.md                    # quickstart
 ├── LICENSE
 ├── .env.example                 # documented environment variables

@@ -1,0 +1,20 @@
+# Single service by design (see plan.md §2/§13). One container runs the whole
+# app: API, SSE, market simulator, AI proxy, and the built SPA.
+services:
+  finally:
+    build: .
+    image: finally:latest
+    ports:
+      - "8080:8080"
+    env_file:
+      - path: .env
+        required: false # M1 runs without any env; set AI_API_KEY later for the co-pilot
+    environment:
+      # Ensure the DB lands on the mounted volume regardless of .env.
+      DATABASE_PATH: /data/finally.db
+    volumes:
+      - finally-data:/data # SQLite persists here across restarts
+    restart: unless-stopped
+
+volumes:
+  finally-data:
