@@ -730,5 +730,223 @@ Milestones are ordered so the app is runnable early and each step adds a visible
 
 ---
 
-*End of plan.*
+## 19. Independent Review — Questions, Feedback & Simplifications
+
+> Added by an **independent architecture review** (via the `/docreview` command,
+> 2026-07-10). The reviewer read this plan cold plus the M1 code and was asked to
+> find weaknesses, not to praise. Section references point back into this document.
+> **These are open items for the author to adjudicate — not yet decisions.**
+
+### Clarifying Questions
+
+1. **Money representation.** Cash, `avg_price`, `quantity`, and fill `price` are all
+   SQLite `REAL` (float64) (§6). Over many fills, average-cost recomputation and cash
+   deduction accumulate binary-float drift — cash can land at `99999.99999997` or drift
+   slightly negative. Store money as integer minor units (cents), or commit to a fixed
+   rounding discipline with an epsilon on the "sufficient cash" check? Decide before M2.
+2. **Price state on restart.** §6 deliberately does not persist per-tick prices; the
+   simulator re-seeds from `instruments.start_price` on boot. Every restart snaps all
+   marks back to seed, causing a discontinuous jump in equity/unrealized P&L, and any
+   `pending` limit order is re-evaluated against reset prices. Persist last-price-per-
+   symbol (one cheap upsert row per symbol) so restarts resume near where they left off?
+3. **Pending limit-order lifetime.** Limit orders rest as `pending` and are swept every
+   tick (§8). No time-in-force or expiry → the pending set grows unbounded and survives
+   restarts (see Q2). Are limit orders GTC or day orders, and what is restart semantics —
+   cancel-on-boot, or resume?
+4. **Notional cap scope.** `AI_MAX_ORDER_NOTIONAL` "bounds any single AI order" (§10.4),
+   but `OrderProposalSchema.orders` is `.min(1)` with **no max** — the model can propose
+   many orders each just under the cap, or many turns in a row. Is the cap per-order,
+   per-proposal aggregate, or per-session? Is notional recomputed at execution time (in
+   `confirm` mode the price moves between proposal and confirm)?
+5. **Fee & slippage model.** §8 says "optional slippage/fee" and `fills` has a `fee`
+   column, but no model is specified. Flat per-trade, bps of notional, or none for v1?
+   This changes cash math and every engine unit test.
+6. **P&L accounting method.** §8 implies average-cost. Is that final (vs FIFO tax lots)?
+   State it explicitly; it drives realized-P&L test expectations.
+7. **Shorting semantics.** `ALLOW_SHORTING` exists but with no margin/buying-power model:
+   what is buying power for a short, how are a short's cost basis and unrealized P&L
+   signed, and is there any margin-call/liquidation? If undefined, should v1 simply
+   forbid shorting to remove an entire branch?
+8. **Reset / liquidation.** There is no endpoint to reset the simulation (flatten
+   positions, restore `STARTING_CASH`). For repeated demos this is needed — in scope for
+   v1? What happens if cash goes negative?
+9. **Access-control reach.** `APP_SHARED_SECRET` is optional and currently unenforced. If
+   the container is exposed beyond localhost, does the secret gate **all** `/api/*`
+   including `/api/stream` and the cost-bearing `/api/ai/chat`? Note `EventSource` cannot
+   send an `Authorization` header — for SSE the secret must be a cookie or query param.
+   Which?
+
+### Architecture & Correctness Feedback
+
+- **Graceful shutdown does not yet stop the market loop.** `index.ts` closes Fastify then
+  the DB, but there is no `clearInterval` for the (not-yet-added) tick timer. When the
+  simulator lands, an in-flight tick can call into a closing DB and throw during
+  shutdown. Also, `process.exit(0)` in `finally` always exits 0 even if `app.close()`/
+  `db.close()` throws, masking shutdown failures. *Mitigation:* register the interval
+  handle and `clearInterval` first in `shutdown`; exit non-zero on shutdown error; add
+  `unhandledRejection`/`uncaughtException` handlers (one bad LLM/tick rejection currently
+  takes down the whole process — the single-container blast radius).
+- **Float-safe cash guard.** Beyond Q1, the "sufficient cash for buys (incl. fee)" check
+  (§8) must tolerate float error or it will spuriously reject exact-balance orders (and
+  spuriously allow tiny overdrafts). *Mitigation:* cents-as-integer, or compare with an
+  epsilon and round the stored result.
+- **Liveness ≠ ticking.** The `HEALTHCHECK` only proves HTTP is up; a market whose
+  `setInterval` died would still report healthy. *Mitigation:* have `/api/health` return
+  `lastTickAt`/tick age and connected-client count, and fail if ticks are stale.
+- **WAL growth.** Long-running WAL with steady writes needs periodic checkpointing or the
+  `-wal` file grows. *Mitigation:* rely on default auto-checkpoint but verify under load;
+  consider a periodic `wal_checkpoint(TRUNCATE)`.
+
+### AI Co-Pilot & Security Concerns
+
+- **No rate limiting on the one endpoint that costs real money.** `/api/ai/chat` spends
+  provider tokens per call, and with `APP_SHARED_SECRET` optional/unenforced it is open on
+  whatever host the container is exposed on. *Mitigation:* require the shared secret
+  whenever AI is enabled; add a per-IP/per-session request cap and a max-tokens ceiling;
+  consider a daily spend/request budget that fails closed.
+- **Prompt injection via chat.** User chat text and (later) any instrument metadata flow
+  into the LLM prompt. A user could try to talk the co-pilot past its caps. *Mitigation:*
+  the engine re-validates every proposal regardless of what the model "decided" (already
+  the design in §10.4) — keep that invariant ironclad and never let the model's text
+  bypass `engine.validate()`.
+- **Key-leak surfaces in logs.** Ensure the AI client never logs request headers (Bearer
+  key) or full upstream error bodies at `info`. A verbose fetch wrapper + Fastify logger
+  is the usual place a key ends up in a log line.
+- **Provider structured-output portability.** Not every model/provider honors JSON-Schema
+  `response_format` identically; a discriminated union is the least-supported shape on the
+  wire. *Mitigation:* prefer tool/function-calling or a flat schema (see Simplify), and
+  keep the Zod validate-then-retry as the real guarantee.
+
+### SSE & Real-Time Concerns
+
+- **No replay / Last-Event-ID.** On reconnect, `EventSource` re-opens but the server has no
+  event log, so events emitted during the gap are lost. For quotes that is fine (next tick
+  corrects the price), but a missed `fill`/`portfolio` delta leaves the UI stale.
+  *Mitigation:* on (re)connect, send a full `snapshot` event (portfolio + current quotes)
+  so the client always resyncs to truth; treat deltas as best-effort.
+- **Browser 6-connection limit & proxy buffering.** One SSE connection per tab; multiple
+  tabs plus HTTP/1.1's ~6-per-origin cap can starve REST calls, and some proxies buffer
+  `text/event-stream`. *Mitigation:* document single-tab expectation for v1; set
+  `Cache-Control: no-cache`, `X-Accel-Buffering: no`, and flush headers immediately.
+- **Backpressure.** Fan-out writes to slow clients can accumulate. *Mitigation:* coalesce
+  quotes to latest-per-symbol-per-tick (already noted in §9) and drop laggards rather than
+  buffer unboundedly.
+
+### Opportunities to Simplify (one container, maximally simple)
+
+- **Fold bootstrap reads into one SSE snapshot.** Instead of the client calling
+  `/api/quotes` + `/api/instruments` + then opening `/api/stream`, emit an initial
+  `snapshot` event (instruments + current quotes + portfolio) as the first SSE message.
+  One round trip to "live," fewer endpoints to maintain, and it doubles as the
+  reconnect-resync mechanism.
+- **Drop TanStack Query for v1.** With SSE already pushing portfolio/quote state, a small
+  `useReducer`/context store fed by the stream is enough; REST is only for
+  mutations (place order) and the one-shot chat call. Removing the dependency shrinks the
+  bundle and the mental model.
+- **Reconsider persisting chat.** The `chat_messages` table (§6) adds a read/write path and
+  schema surface for a single-tenant local sim. Keeping the last N turns in memory (lost on
+  restart) is simpler and probably fine for v1; drop the table until cross-restart history
+  is a real requirement.
+- **Simplify the AI contract to tool-calls or a flat object.** Two tools
+  (`emit_analysis`, `propose_orders`) or a single flat object with an optional `orders[]`
+  is simpler to prompt and more portable across providers than `z.discriminatedUnion`.
+- **Candle buffer can wait.** For M1/M2 the chart can render from the live quote stream
+  alone; the 300-candle in-memory history (§7) is an optimization, not a requirement — add
+  it when the chart actually needs backfill.
+- **Delete the `drizzle-kit` alternative from §3.** The hand-rolled runner (already in
+  `migrate.ts`) is fine and simpler; naming an unused alternative invites future churn.
+
+### Doc-vs-Implementation Drift (M1)
+
+- **Dockerfile install strategy differs materially.** §13 specifies `npm ci` (build) and
+  `npm ci --omit=dev --workspace server --workspace shared` (runtime). The actual
+  `Dockerfile` uses `npm install --no-audit --no-fund` then `npm prune --omit=dev` and
+  copies the **entire pruned `node_modules`** from the build stage into runtime.
+  Consequences: `npm install` is less reproducible and may mutate the lockfile (vs
+  `npm ci`), and the runtime image ships all three workspaces' hoisted prod deps rather
+  than only server+shared. Reconcile: update §13's code block to match, or switch the
+  Dockerfile back to `npm ci`.
+- **Toolchain + resiliency additions not in the doc.** The real Dockerfile adds an apt
+  build-toolchain fallback (python3/make/g++) and npm fetch-retry env vars that §13 does
+  not mention. Additive and reasonable, but the doc should note them so §17's "no compiler
+  needed" claim is qualified. *(Build note: in this sandbox the image only builds with
+  `docker build --network=host`, because the default buildkit network cannot reach the npm
+  registry — a host/network constraint, not a Dockerfile defect.)*
+- **Healthcheck differs.** §13 hardcodes `http://localhost:8080/api/health`; the real
+  Dockerfile parameterizes the port via `process.env.PORT||8080` and adds
+  `--interval/--timeout/--start-period/--retries`. The code is better — update §13.
+- **AI-schema field casing drift.** The real `ai-schema.ts` uses `riskFlags` and
+  `limitPrice` (camelCase), while §10.2's illustrative schema uses `risk_flags` and
+  `limit_price` (snake_case) — and the SQL/API (§6, §11) uses `limit_price`. Pick one
+  casing for the wire/prompt contract; right now doc, DB, and Zod disagree.
+- **`observations` default drift.** Real `AnalysisSchema.observations` has `.default([])`;
+  §10.2's version does not. Align them (and don't advertise a JSON-Schema default the model
+  can't honor).
+- **`AI_API_KEY` "REQUIRED" vs optional.** §12 labels `AI_API_KEY` **REQUIRED** and claims
+  the process "fails fast if required vars are missing," but `config.ts` declares it
+  `.optional()` and derives an `aiEnabled` flag — the app boots fine with no key and AI is
+  simply disabled. The code behavior is arguably better; fix the doc (mark it "required
+  only to enable AI") or the code.
+- **Auth gate not yet implemented.** `index.ts` registers only `healthRoutes` and
+  `portfolioRoutes` (expected for M1), and there is **no `APP_SHARED_SECRET` gate** despite
+  §12/§10.4 implying one. Not an M1 defect, but track it: the moment `/api/ai/chat` lands
+  without that gate, the money-spending endpoint is open.
+
+---
+
+## 20. AI Inference & Optional Real Market Data
+
+Two design decisions that refine the AI co-pilot (§10) and the market data layer (§7),
+both implemented in a way that keeps our TypeScript stack and the single-container rule.
+
+### 20.1 Cerebras inference skill (`.claude/skills/cerebras/`)
+
+The AI co-pilot calls an LLM through the **OpenAI-compatible OpenRouter** endpoint,
+pinning **Cerebras** as the inference provider for low latency, and validates the reply
+as a **Zod-typed structured output**. The core idiom (TypeScript):
+
+```ts
+export const MODEL = 'openai/gpt-oss-120b';
+export const PROVIDER_ROUTING = { provider: { order: ['cerebras'] } };
+
+const res = await client.chat.completions.create({
+  model: MODEL,
+  messages,
+  reasoning_effort: 'low',
+  response_format: { type: 'json_schema', json_schema: { /* zodToJsonSchema(...) */ } },
+  // @ts-expect-error passed through to OpenRouter
+  extra_body: PROVIDER_ROUTING,
+});
 ```
+
+The full recipe lives at `.claude/skills/cerebras/SKILL.md` and validates against
+`CoPilotResponseSchema` in `shared/ai-schema.ts`, implementing §10.2. It also documents an
+`AI_MOCK=true` deterministic mode so tests and local dev run without an API key. On free
+OpenRouter models `PROVIDER_ROUTING` is dropped (free tiers don't reliably honor a forced
+provider).
+
+### 20.2 Optional real market data (`MASSIVE_API_KEY`)
+
+The simulator (§7) stays the default and only source needed for a fully self-contained
+run. A single env var optionally swaps in real quotes, selected once at startup behind the
+same provider interface:
+
+```
+MASSIVE_API_KEY=""        → GBM simulator (default, recommended, fully self-contained)
+MASSIVE_API_KEY="pk_..."  → real quotes via the Massive/Polygon REST API
+```
+
+- Add `MASSIVE_API_KEY` to `config.ts` and `.env.example` (empty default).
+- A `market/provider.ts` factory returns `SimulatorProvider` when the key is empty and a
+  TS `MassiveProvider` (thin `fetch` client against the Massive/Polygon REST API) when set
+  — both implementing the same interface the simulator already exposes. SSE, the price
+  cache, and the frontend stay source-agnostic. The poller respects the API tier and
+  degrades gracefully to a stale cache on failure rather than crashing.
+
+Both the default (self-contained, no external calls) and the real-data path run **in the
+same single container** — the provider is just another in-process module, never a separate
+service.
+
+---
+
+*End of plan.*
