@@ -19,8 +19,14 @@ export const SEED_INSTRUMENTS: Omit<Instrument, 'createdAt'>[] = [
 /** Default trading fee applied per fill (flat, for simplicity). */
 export const DEFAULT_FEE = 0;
 
+/** Candle aggregation window (ms) — one candle per this interval. */
+export const CANDLE_INTERVAL_MS = 5_000;
+
 /** Number of in-memory candles the simulator retains per symbol. */
 export const CANDLE_BUFFER_SIZE = 300;
+
+/** Epsilon for float money comparisons (cash guards tolerate tiny drift). */
+export const MONEY_EPSILON = 1e-6;
 
 /** SSE heartbeat interval (ms) to keep idle connections alive. */
 export const SSE_HEARTBEAT_MS = 15_000;

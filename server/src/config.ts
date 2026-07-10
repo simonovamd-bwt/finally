@@ -27,6 +27,8 @@ const EnvSchema = z.object({
   MARKET_ALWAYS_OPEN: boolish(true),
   STARTING_CASH: z.coerce.number().positive().default(100_000),
   ALLOW_SHORTING: boolish(false),
+  // Empty → GBM simulator (default). Set → real quotes via Massive/Polygon (§20.2).
+  MASSIVE_API_KEY: z.string().optional(),
 
   AI_PROVIDER: z.enum(['openrouter', 'cerebras']).default('openrouter'),
   AI_API_KEY: z.string().optional(),
