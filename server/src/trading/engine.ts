@@ -24,6 +24,11 @@ export interface SubmitResult {
   fill: Fill | null; // null when a limit order rests as pending
 }
 
+/** Round to cents to keep persisted money values free of float dust. */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
 export class OrderRejectedError extends Error {
   constructor(message: string) {
     super(message);
@@ -220,7 +225,9 @@ export class TradingEngine {
 
     const next = applyFill(prevQty, prevAvg, side, quantity, price);
 
-    if (next.quantity === 0) {
+    // Flatten to zero when the residual is float dust, not just an exact 0 —
+    // otherwise fractional shares can leave a ~1e-17 position (or dust short).
+    if (Math.abs(next.quantity) < MONEY_EPSILON) {
       db.prepare('DELETE FROM positions WHERE symbol = ?').run(symbol);
     } else {
       db.prepare(
@@ -230,15 +237,21 @@ export class TradingEngine {
            quantity = excluded.quantity,
            avg_price = excluded.avg_price,
            updated_at = excluded.updated_at`,
-      ).run(symbol, next.quantity, next.avgPrice, ts);
+      ).run(symbol, next.quantity, round2(next.avgPrice), ts);
     }
 
     // Cash: buys debit (notional + fee), sells credit (notional − fee).
+    // Fold realized P&L (from any closing portion) into the same account write,
+    // so settlement stays atomic (plan §8).
     const notional = quantity * price;
     const cashDelta = side === 'buy' ? -(notional + fee) : notional - fee;
     db.prepare(
-      'UPDATE account SET cash = cash + ?, updated_at = ? WHERE id = 1',
-    ).run(cashDelta, ts);
+      `UPDATE account
+         SET cash = cash + ?,
+             realized_pnl = realized_pnl + ?,
+             updated_at = ?
+       WHERE id = 1`,
+    ).run(round2(cashDelta), round2(next.realizedPnl), ts);
 
     const fill: Fill = {
       id: randomUUID(),

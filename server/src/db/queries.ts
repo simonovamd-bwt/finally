@@ -79,6 +79,13 @@ export function getCash(): number {
   return row?.cash ?? 0;
 }
 
+export function getRealizedPnl(): number {
+  const row = db
+    .prepare('SELECT realized_pnl FROM account WHERE id = 1')
+    .get() as { realized_pnl: number } | undefined;
+  return row?.realized_pnl ?? 0;
+}
+
 export function getPositions(): Position[] {
   const rows = db
     .prepare('SELECT * FROM positions ORDER BY symbol')

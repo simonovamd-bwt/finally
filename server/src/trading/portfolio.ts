@@ -3,7 +3,7 @@
 // come from the in-memory PriceCache.
 
 import type { Portfolio, PositionView } from '@finally/shared';
-import { getCash, getPositions } from '../db/queries.js';
+import { getCash, getPositions, getRealizedPnl } from '../db/queries.js';
 import type { PriceCache } from '../market/cache.js';
 
 export function buildPortfolio(cache: PriceCache): Portfolio {
@@ -24,6 +24,14 @@ export function buildPortfolio(cache: PriceCache): Portfolio {
 
   const equity = cash + views.reduce((sum, v) => sum + v.marketValue, 0);
   const unrealizedPnl = views.reduce((sum, v) => sum + v.unrealizedPnl, 0);
+  const realizedPnl = getRealizedPnl();
 
-  return { cash, positions: views, equity, unrealizedPnl, updatedAt: Date.now() };
+  return {
+    cash,
+    positions: views,
+    equity,
+    unrealizedPnl,
+    realizedPnl,
+    updatedAt: Date.now(),
+  };
 }

@@ -20,12 +20,22 @@ function frame(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
+/** Write to one client; on any error (e.g. socket torn down mid-tick), drop it. */
+function safeWrite(client: Client, payload: string): void {
+  try {
+    client.reply.raw.write(payload);
+  } catch {
+    // The socket is gone or erroring — remove the client so a synchronous
+    // throw can never unwind out of a bus emit (e.g. the tick loop).
+    clients.delete(client);
+  }
+}
+
 function broadcast(event: string, data: unknown): void {
   const payload = frame(event, data);
-  for (const c of clients) {
-    // write() returns false under backpressure; we drop rather than buffer
-    // unboundedly — the next tick corrects prices and the DB holds the record.
-    c.reply.raw.write(payload);
+  // Snapshot the set: safeWrite may delete during iteration.
+  for (const c of [...clients]) {
+    safeWrite(c, payload);
   }
 }
 
@@ -64,7 +74,7 @@ export function clientCount(): number {
 function ensureHeartbeat(): void {
   if (heartbeat) return;
   heartbeat = setInterval(() => {
-    for (const c of clients) c.reply.raw.write(': ping\n\n'); // comment frame
+    for (const c of [...clients]) safeWrite(c, ': ping\n\n'); // comment frame
   }, SSE_HEARTBEAT_MS);
   heartbeat.unref?.();
 }

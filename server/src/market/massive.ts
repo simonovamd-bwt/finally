@@ -18,6 +18,7 @@ export class MassiveProvider implements MarketDataProvider {
   readonly name = 'massive';
   private timer: ReturnType<typeof setInterval> | null = null;
   private symbols: string[] = [];
+  private polling = false; // overlap guard: skip a tick if the last poll runs long
 
   constructor(
     private readonly cache: PriceCache,
@@ -45,6 +46,10 @@ export class MassiveProvider implements MarketDataProvider {
   }
 
   private async poll(): Promise<void> {
+    // If the previous poll is still running (slow network / large watchlist),
+    // skip this tick rather than stacking overlapping request batches.
+    if (this.polling) return;
+    this.polling = true;
     const ts = Date.now();
     const quotes: Quote[] = [];
     try {
@@ -60,6 +65,8 @@ export class MassiveProvider implements MarketDataProvider {
       // Degrade gracefully: keep the stale cache rather than crash.
       // eslint-disable-next-line no-console
       console.warn(`[massive] poll failed, using stale cache: ${String(err)}`);
+    } finally {
+      this.polling = false;
     }
   }
 

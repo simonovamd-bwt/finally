@@ -68,11 +68,12 @@ async function main(): Promise<void> {
 
   // 7) Graceful shutdown: stop ticking → close SSE → close HTTP → close DB.
   let shuttingDown = false;
+  let exitCodeOverride = 0; // set to 1 by fatal handlers below
   const shutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     app.log.info(`received ${signal}, shutting down`);
-    let code = 0;
+    let code = exitCodeOverride;
     try {
       provider.stop();
       closeSse();
@@ -87,6 +88,17 @@ async function main(): Promise<void> {
   };
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
+
+  // Last-resort nets: a stray rejection/throw (bad tick, LLM path, SSE write)
+  // must not silently take down the single container. Log and shut down cleanly
+  // with a non-zero code so the orchestrator restarts us in a known state.
+  const fatal = (label: string, detail: unknown): void => {
+    app.log.error({ detail }, label);
+    exitCodeOverride = 1;
+    void shutdown(label);
+  };
+  process.on('unhandledRejection', (reason) => fatal('unhandledRejection', reason));
+  process.on('uncaughtException', (err) => fatal('uncaughtException', err));
 }
 
 main().catch((err) => {

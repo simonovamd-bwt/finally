@@ -80,6 +80,7 @@ export interface Portfolio {
   positions: PositionView[];
   equity: number; // cash + sum(marketValue)
   unrealizedPnl: number;
+  realizedPnl: number; // accumulated from closing fills this session
   updatedAt: number;
 }
 
@@ -112,7 +113,17 @@ export interface HealthResponse {
 }
 
 // ── SSE event payloads ────────────────────────────────
+
+/** Initial state sent once when a client connects (for immediate render + resync). */
+export interface StreamSnapshot {
+  instruments: Instrument[];
+  quotes: Quote[];
+  candles: Record<string, Candle[]>;
+  portfolio: Portfolio;
+}
+
 export type StreamEvent =
+  | { type: 'snapshot'; data: StreamSnapshot }
   | { type: 'quote'; data: Quote[] }
   | { type: 'candle'; data: Candle }
   | { type: 'fill'; data: Fill }

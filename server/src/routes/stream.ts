@@ -4,6 +4,7 @@
 // the broker until the client disconnects.
 
 import type { FastifyInstance } from 'fastify';
+import type { StreamSnapshot } from '@finally/shared';
 import type { AppContext } from '../context.js';
 import { getInstruments } from '../db/queries.js';
 import { buildPortfolio } from '../trading/portfolio.js';
@@ -21,14 +22,15 @@ export function streamRoutes(ctx: AppContext) {
 
       const ts = Date.now();
       const instruments = getInstruments();
-      sendSnapshot(reply, {
+      const snapshot: StreamSnapshot = {
         instruments,
         quotes: ctx.cache.quotes(ts),
         candles: Object.fromEntries(
           instruments.map((i) => [i.symbol, ctx.cache.getCandles(i.symbol)]),
         ),
         portfolio: buildPortfolio(ctx.cache),
-      });
+      };
+      sendSnapshot(reply, snapshot);
 
       const cleanup = addClient(reply);
       req.raw.on('close', cleanup);
